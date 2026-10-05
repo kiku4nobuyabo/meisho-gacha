@@ -1,4 +1,4 @@
-# v0.1.2 検証記録
+# v0.1.3 検証記録
 
 確認日：2026-10-05
 実行環境：Node.js 24.19.0 / Linux
@@ -64,3 +64,7 @@
 
 ## v0.1.2 UI修正
 - モーダル表示中の通知・GitHub接続エラーは `#dialog-message` に表示し、ネイティブ dialog の背面へ隠れないこと。
+
+## v0.1.3 GitHub接続修正
+
+ブラウザ標準fetchをクラスのプロパティ経由で未bind呼び出ししていたため、ChromeでIllegal invocationになる問題を修正。globalThis.fetch.bind(globalThis)を使用する。

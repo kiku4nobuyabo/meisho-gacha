@@ -1,4 +1,4 @@
-# 名将記録 v0.1.2
+# 名将記録 v0.1.3
 
 信長の野望・真戦の個人用「名将ガチャ」記録ツールです。
 静的HTML / CSS / JavaScriptだけで動きます。ビルド・サーバー構築・外部AI APIは不要です。
@@ -85,3 +85,14 @@ GitHub同期は整形後のJSONが950,000バイト以下まで。上限でも端
 ## v0.1.2 修正
 
 GitHub接続設定などのモーダル内で発生したエラーを、モーダルの背面ではなく画面内に表示するよう修正しました。ネイティブ `<dialog>` の top layer により通常トーストが隠れる問題への対応です。
+
+## v0.1.3 修正
+
+- Chrome等でGitHub接続時に `Failed to execute 'fetch' on 'Window': Illegal invocation` となる問題を修正しました。
+- ブラウザ標準の `fetch` をWindowに正しくbindして呼び出すようにしました。
+- データ形式・保存キー・武将DB・シーズン・排出プールの仕様変更はありません。
+
+
+## v0.1.4
+- GitHub Pages / browser module cache対策として app.js と sync.js にバージョンクエリを付与。
+- GitHub API 呼び出しは native fetch をメソッド参照として保持せず、ラッパー関数経由で実行。

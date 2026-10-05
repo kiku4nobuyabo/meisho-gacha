@@ -1,7 +1,7 @@
 import {seed} from './seed.js';
 import {id,now,clone,createData,validate,apply,project,activeSeason,currentPool,generalSort} from './core.js';
 import {LocalStore,makeEnvelope} from './storage.js';
-import {GitHub,normalizeConfig,remoteKey,synchronize,ConflictError} from './sync.js';
+import {GitHub,normalizeConfig,remoteKey,synchronize,ConflictError} from './sync.js?v=0.1.4';
 
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const app=$('#app'), dialog=$('#dialog'), body=$('#dialog-body');
