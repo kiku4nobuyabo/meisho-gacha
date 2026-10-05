@@ -13,7 +13,7 @@ export class ConflictError extends Error {
   constructor(remote){super('別の端末から更新されています。両方の記録を確認してください。');this.name='ConflictError';this.remote=remote;}
 }
 export class GitHub {
-  constructor(config,fetcher=fetch){this.config=normalizeConfig(config);this.fetcher=fetcher;this.key=remoteKey(this.config);}
+  constructor(config,fetcher=null){this.config=normalizeConfig(config);this.fetcher=fetcher||globalThis.fetch.bind(globalThis);this.key=remoteKey(this.config);}
   get root(){const c=this.config;return `https://api.github.com/repos/${encodeURIComponent(c.owner)}/${encodeURIComponent(c.repo)}`;}
   get file(){return `${this.root}/contents/${this.config.path.split('/').map(encodeURIComponent).join('/')}`;}
   async request(url,options={}){
