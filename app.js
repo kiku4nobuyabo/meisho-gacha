@@ -24,8 +24,12 @@ function migrateSeedRates(data){
   if(changed){n.revision=id();n.updatedAt=now();validate(n);}
   return {data:n,changed};
 }
-function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,4500);}
-function show(title,html){$('#dialog-title').textContent=title;body.innerHTML=html;if(!dialog.open)dialog.showModal();dialog.scrollTop=0;}
+function toast(message){
+  const target=dialog.open?$('#dialog-message'):$('#toast');
+  target.textContent=message;target.hidden=false;clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>target.hidden=true,dialog.open?9000:4500);
+}
+function show(title,html){$('#dialog-title').textContent=title;const m=$('#dialog-message');if(m)m.hidden=true;body.innerHTML=html;if(!dialog.open)dialog.showModal();dialog.scrollTop=0;}
 function close(){dialog.close();view={};}
 function download(data,name='meisho-backup'){const blob=new Blob([typeof data==='string'?data:JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`${name}-${now().replace(/[:.]/g,'-')}.json`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function statusHTML(){
