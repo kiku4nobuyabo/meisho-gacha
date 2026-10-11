@@ -1,4 +1,4 @@
-import {validate} from './core.js';
+import {validate} from './core.js?v=0.1.5';
 export function normalizeConfig(c){
   const n={owner:c.owner.trim(),repo:c.repo.trim(),branch:c.branch.trim()||'main',path:c.path.trim()||'data/record.json',token:c.token.trim()};
   if(!/^[A-Za-z0-9-]+$/.test(n.owner)||!/^[A-Za-z0-9_.-]+$/.test(n.repo)||!n.token)throw new Error('所有者・リポジトリ名・トークンを入力してください。');

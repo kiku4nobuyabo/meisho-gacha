@@ -23,3 +23,37 @@ test('bulk classification creates a new pool snapshot for active members',()=>{l
 test('sorting is based on kana and source faction labels are preserved',()=>{const oda=seed.filter(g=>g.faction==='織田').sort(generalSort);assert.equal(oda[0].name,'明智秀満');assert.ok(oda.findIndex(g=>g.name==='織田信長')<oda.findIndex(g=>g.name==='柴田勝家'));});
 test('malformed imports rejected: version, duplicates, missing pool, altered S, impossible counter',()=>{const valid=pull(ready());const cases=[d=>d.schemaVersion=99,d=>d.generals.push(d.generals[0]),d=>d.events[0].poolId='missing',d=>d.events[0].general.rate='low',d=>d.events[0].at='broken',d=>d.activeSeasonId='none'];for(const f of cases){const d=clone(valid);f(d);assert.throws(()=>validate(d));}let d=ready();for(let i=0;i<29;i++)d=normal(d);const e=clone(d.events.at(-1));e.id='impossible';d.events.push(e);assert.throws(()=>validate(d),/30回目/);});
 test('JSON export / import round-trip reproduces state and archived snapshots',()=>{let d=ready();for(let i=0;i<4;i++)d=normal(d);d=pull(d);d=undo(d);d=pull(d,'low');const restored=validate(JSON.parse(JSON.stringify(d)));assert.deepEqual(restored,d);assert.deepEqual(project(restored),project(d));});
+
+test('one +5 records five consecutive S-free pulls as one batch, preserves original JSON format',()=>{
+  let d=ready();d=apply(d,{type:'normal5'},'phone');
+  const state=project(d), events=d.events;
+  assert.equal(state.total,5);assert.equal(state.pity,5);assert.equal(state.sCount,0);
+  assert.equal(events.length,5);assert.equal(new Set(events.map(e=>e.batchId)).size,1);
+  assert.ok(events.every(e=>e.result==='normal'&&e.type==='pull'));
+  assert.deepEqual(validate(JSON.parse(JSON.stringify(d))),d);
+  const restored=apply(d,{type:'normal'},'pc');
+  assert.equal(project(restored).total,6);assert.equal(project(restored).pity,6);
+});
+test('+5 respects 30-pull guarantee, and does not alter streak',()=>{
+  let d=ready();for(let i=0;i<24;i++)d=normal(d);
+  d=apply(d,{type:'normal5'});
+  assert.equal(project(d).pity,29);
+  assert.throws(()=>apply(d,{type:'normal5'}),/S天井30回目/);
+  assert.throws(()=>normal(d),/30回目/);
+  d=pull(d);assert.equal(project(d).total,30);assert.equal(project(d).pity,0);
+  d=apply(d,{type:'normal5'});assert.equal(project(d).total,35);
+  assert.equal(project(d).streak,1);
+});
+test('one undo cancels entire +5 batch and then can undo older single entry',()=>{
+  let d=normal(ready());d=apply(d,{type:'normal5'});
+  assert.equal(project(d).total,6);
+  d=undo(d);assert.equal(project(d).total,1);assert.equal(project(d).pity,1);
+  assert.equal(d.events.filter(e=>e.type==='undo').length,5);
+  d=undo(d);assert.equal(project(d).total,0);
+  assert.deepEqual(validate(JSON.parse(JSON.stringify(d))),d);
+});
+test('batch history validation refuses incomplete or interleaved groups',()=>{
+  const d=apply(ready(),{type:'normal5'});
+  const missing=clone(d);missing.events.pop();assert.throws(()=>validate(missing),/5連の履歴/);
+  const injected=clone(d);injected.events.splice(2,0,{...injected.events[1],id:'other',batchId:undefined});assert.throws(()=>validate(injected),/5連の履歴/);
+});

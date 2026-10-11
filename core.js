@@ -54,6 +54,15 @@ export function validate(d) {
     assert(seasons.has(p.seasonId)&&str(p.label,80)&&date(p.createdAt)&&Array.isArray(p.generals)&&unique(p.generals),'排出プールが不正です。');
     p.generals.forEach(g=>{validGeneral(g);assert(str(g.id)&&['high','low'].includes(g.rate),'排出プールの区分が未設定です。');});
   }
+  const batches=new Map();
+  for(const [i,e] of d.events.entries())if(e.type==='pull'&&e.batchId){
+    assert(str(e.batchId),'5連の識別情報が不正です。');
+    if(!batches.has(e.batchId))batches.set(e.batchId,[]);
+    batches.get(e.batchId).push({e,i});
+  }
+  for(const group of batches.values()){
+    assert(group.length===5&&group.every(({e,i},j)=>e.result==='normal'&&i===group[0].i+j&&e.seasonId===group[0].e.seasonId&&e.poolId===group[0].e.poolId),'5連の履歴が不正です。');
+  }
   let seasonOrder=-1;
   for(const e of d.events){
     const order=d.seasons.findIndex(s=>s.id===e.seasonId);
@@ -117,9 +126,15 @@ export function apply(d,command,deviceId='local') {
       assert(str(command.label,80),'プール名を入力してください。');
       n.pools.push({id:id(),seasonId:n.activeSeasonId,label:command.label.trim(),createdAt:at,generals:clone(generals)});break;
     }
-    case 'normal': case 'S': {
+    case 'normal': case 'normal5': case 'S': {
       const p=currentPool(n), state=project(n);
       assert(p,'初期排出プールを保存してください。');
+      if(command.type==='normal5') {
+        assert(state.pity<=24,'この5連にはS天井30回目が含まれます。+1と「Sが出た」で順番に記録してください。');
+        const batchId=id();
+        for(let i=0;i<5;i++)n.events.push({id:id(),type:'pull',at,deviceId,seasonId:n.activeSeasonId,poolId:p.id,result:'normal',batchId});
+        break;
+      }
       const e={id:id(),type:'pull',at,deviceId,seasonId:n.activeSeasonId,poolId:p.id,result:command.type};
       if(command.type==='normal') assert(state.pity<29,'次は30回目でS確定です。「Sが出た」から記録してください。');
       else {
@@ -134,7 +149,10 @@ export function apply(d,command,deviceId='local') {
       const last=project(n).rows.at(-1);
       assert(last,'戻せる記録がありません。');
       assert(last.id===command.targetId,'直近の記録が変わりました。確認し直してください。');
-      n.events.push({id:id(),type:'undo',at,deviceId,seasonId:n.activeSeasonId,targetId:last.id});break;
+      const rows=project(n).rows;
+      const targets=last.batchId?rows.slice(-5).filter(e=>e.batchId===last.batchId).reverse():[last];
+      for(const target of targets)n.events.push({id:id(),type:'undo',at,deviceId,seasonId:n.activeSeasonId,targetId:target.id});
+      break;
     }
     default: throw new Error('未対応の操作です。');
   }

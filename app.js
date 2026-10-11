@@ -1,13 +1,14 @@
 import {seed} from './seed.js';
-import {id,now,clone,createData,validate,apply,project,activeSeason,currentPool,generalSort} from './core.js';
-import {LocalStore,makeEnvelope} from './storage.js';
-import {GitHub,normalizeConfig,remoteKey,synchronize,ConflictError} from './sync.js?v=0.1.4';
+import {id,now,clone,createData,validate,apply,project,activeSeason,currentPool,generalSort} from './core.js?v=0.1.5';
+import {LocalStore,makeEnvelope} from './storage.js?v=0.1.5';
+import {GitHub,normalizeConfig,remoteKey,synchronize,ConflictError} from './sync.js?v=0.1.5';
+import {mergeSyncResult} from './sync-merge.js?v=0.1.5';
 
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const app=$('#app'), dialog=$('#dialog'), body=$('#dialog-body');
 const key='meisho-v1:'+location.pathname.replace(/index\.html$/,'');
 const store=new LocalStore(localStorage,key);
-let env,config,savedSettings,busy=false,syncError='',conflict=null,toastTimer,view={},fatal=false;
+let env,config,savedSettings,busy=false,syncing=false,syncTimer=null,syncQueued=false,syncError='',conflict=null,toastTimer,view={},fatal=false;
 let deviceId;
 const fmt=s=>new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(s));
 const rateLabel=r=>({low:'低排出S',high:'高排出S',unknown:'区分未設定'}[r]);
@@ -34,9 +35,10 @@ function close(){dialog.close();view={};}
 function download(data,name='meisho-backup'){const blob=new Blob([typeof data==='string'?data:JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`${name}-${now().replace(/[:.]/g,'-')}.json`;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function statusHTML(){
   let text,level='';
-  if(busy)text='保存・同期中…';
+  if(busy)text='端末に保存中…';
   else if(conflict){text='同期の競合あり · 記録は端末に保存済み';level='error';}
   else if(syncError){text=syncError;level='error';}
+  else if(syncing){text=env.dirty?'端末に保存済み · GitHub同期中…':'GitHubの更新を確認中…';level=env.dirty?'warning':'';}
   else if(!config){text='この端末に保存中 · GitHub未接続';level='warning';}
   else if(env.dirty){text='未同期の記録があります';level='warning';}
   else text=`GitHub同期済み${env.lastSync?' · '+fmt(env.lastSync).slice(11):''}`;
@@ -45,35 +47,79 @@ function statusHTML(){
 function render(){
   if(fatal)return;
   const season=activeSeason(d()),p=currentPool(d()),s=project(d());
-  if(!season){app.innerHTML=`<section class="panel"><div class="eyebrow">はじめての記録</div><h2>名将ガチャを、ひと目で。</h2><p class="help">引いたら「+1」または「Sが出た」。<br>S天井と低排出保証を、一緒に数えます。</p><div class="stack">${button('new-season','最初のシーズンを始める','primary')}${button('github','GitHubの記録を読み込む')}</div><p class="help">別の端末で記録済みなら、GitHubから読み込んでください。</p></section>${statusHTML()}<section class="panel"><h3>武将データ ${d().generals.length}人</h3><p class="help">添付一覧の名前・所属を登録済みです。排出区分と初期プールは、ゲーム内の一覧に合わせて設定してください。</p>${button('generals','武将を設定する','full')}</section>`;return;}
+  if(!season){app.innerHTML=`<section class="panel"><div class="eyebrow">はじめての記録</div><h2>名将ガチャを、ひと目で。</h2><p class="help">引いたら「+1」「+5」または「Sが出た」。<br>S天井と低排出保証を、一緒に数えます。</p><div class="stack">${button('new-season','最初のシーズンを始める','primary')}${button('github','GitHubの記録を読み込む')}</div><p class="help">別の端末で記録済みなら、GitHubから読み込んでください。</p></section>${statusHTML()}<section class="panel"><h3>武将データ ${d().generals.length}人</h3><p class="help">添付一覧の名前・所属を登録済みです。排出区分と初期プールは、ゲーム内の一覧に合わせて設定してください。</p>${button('generals','武将を設定する','full')}</section>`;return;}
   const disabled=busy||!p||!!conflict;
-  const recent=s.rows.slice(-6).reverse().map(e=>`<div class="log-row"><div><div class="log-time">${fmt(e.at)}</div><div class="log-main">${e.result==='S'?'S：'+esc(e.general.name):'+1'}${e.result==='S'?` <span class="pill ${e.general.rate==='low'?'low':''}">${rateLabel(e.general.rate)}</span>`:''}</div><div class="log-info">${e.result==='S'?`${e.interval}連目 · 高排出連続 ${e.streakAfter} / 5`:`シーズン通算 ${e.pullNumber}回目`}</div></div></div>`).join('');
-  app.innerHTML=`<section class="panel input-panel"><div class="section-head"><div><div class="eyebrow">今日の名将ガチャ</div><h2>引いた結果を記録</h2></div><span class="season-label">${esc(season.name)}</span></div><div class="input-buttons"><button type="button" class="pull-button" data-action="normal" ${disabled?'disabled':''}><strong>+1</strong><span>S以外が出た</span></button><button type="button" class="pull-button s" data-action="choose-s" ${disabled?'disabled':''}><strong>Sが出た</strong><span>武将を選んで1回分記録</span></button></div><div class="input-foot"><span>どちらか一方だけでOK</span>${button('undo','↶ 直近1件を戻す','text-button',(!s.total||disabled)?'disabled':'')}</div>${!p?notice('初期排出プールを設定すると、記録を始められます。')+button('pool','初期排出プールを設定','primary full'):''}${p&&s.pity===29?notice('次は30回目。「Sが出た」から記録してください。','warning'):''}</section>${statusHTML()}<div class="counter-grid"><section class="panel counter"><h2>S天井</h2><div class="counter-number">${s.pity}<span>/ 30</span></div><p class="counter-caption">あと <strong>${30-s.pity}回</strong>でS確定</p><div class="progress" aria-hidden="true">${Array.from({length:30},(_,i)=>`<i class="${i<s.pity?'filled':''}"></i>`).join('')}</div></section><section class="panel counter ${s.streak===5?'guarantee':''}"><h2>低排出保証 · 高排出連続</h2><div class="counter-number">${s.streak}<span>/ 5</span></div><p class="counter-caption">${s.streak===5?'<strong>次のSは低排出確定</strong>':'低排出Sが出るとリセット'}</p><div class="streak-dots" aria-hidden="true">${Array.from({length:5},(_,i)=>`<i class="${i<s.streak?'filled':''}"></i>`).join('')}</div></section></div><div class="lower-grid"><section class="panel"><div class="section-head"><h2>直近の記録</h2>${button('history','すべて見る →','text-button')}</div>${recent||'<p class="empty">このシーズンの記録はまだありません。</p>'}</section><section class="panel"><div class="section-head"><h2>今シーズン</h2><span class="eyebrow">${esc(season.name)}</span></div><dl class="stats"><div><dt>総ガチャ回数</dt><dd>${s.total}<small>回</small></dd></div><div><dt>S排出数</dt><dd>${s.sCount}<small>体</small></dd></div><div><dt>高排出S</dt><dd>${s.high}<small>体</small></dd></div><div><dt>低排出S</dt><dd>${s.low}<small>体</small></dd></div></dl><p class="help">現在のプール：${p?esc(p.label)+' · '+p.generals.length+'人':'未設定'}</p>${p?button('current-pool','プールを見る →','text-button'):''}</section></div>`;
+  const fiveDisabled=disabled||s.pity>24;
+  const recentGroups=[];
+  for(const e of s.rows.slice().reverse()){
+    if(e.batchId && recentGroups.at(-1)?.[0].batchId===e.batchId)recentGroups.at(-1).push(e);
+    else recentGroups.push([e]);
+    if(recentGroups.length>=6 && (!e.batchId||recentGroups.at(-1).length===5))break;
+  }
+  const recent=recentGroups.map(group=>{const e=group[0],batch=e.batchId&&group.length===5;return `<div class="log-row"><div><div class="log-time">${fmt(e.at)}</div><div class="log-main">${e.result==='S'?'S：'+esc(e.general.name):batch?'+5（5連）':'+1'}${e.result==='S'?` <span class="pill ${e.general.rate==='low'?'low':''}">${rateLabel(e.general.rate)}</span>`:''}</div><div class="log-info">${e.result==='S'?`${e.interval}連目 · 高排出連続 ${e.streakAfter} / 5`:`シーズン通算 ${e.pullNumber}回目`}</div></div></div>`}).join('');
+  app.innerHTML=`<section class="panel input-panel"><div class="section-head"><div><div class="eyebrow">今日の名将ガチャ</div><h2>引いた結果を記録</h2></div><span class="season-label">${esc(season.name)}</span></div><div class="input-buttons"><button type="button" class="pull-button" data-action="normal" ${disabled?'disabled':''}><strong>+1</strong><span>S以外を1回記録</span></button><button type="button" class="pull-button five" data-action="normal5" ${fiveDisabled?'disabled':''} title="Sが出なかった5連をまとめて記録"><strong>+5</strong><span>Sなし5連を記録</span></button><button type="button" class="pull-button s" data-action="choose-s" ${disabled?'disabled':''}><strong>Sが出た</strong><span>武将を選んで1回分記録</span></button></div><div class="input-foot"><span>実際の排出順に入力 · +5はSなし専用</span>${button('undo',s.rows.at(-1)?.batchId?'↶ 直近の5連を戻す':'↶ 直近1件を戻す','text-button',(!s.total||disabled)?'disabled':'')}</div>${!p?notice('初期排出プールを設定すると、記録を始められます。')+button('pool','初期排出プールを設定','primary full'):''}${p&&s.pity===29?notice('次は30回目。「Sが出た」から記録してください。','warning'):p&&s.pity>24?notice('天井が近いため＋5は一時停止中。＋1または「Sが出た」で記録してください。','warning'):''}</section>${statusHTML()}<div class="counter-grid"><section class="panel counter"><h2>S天井</h2><div class="counter-number">${s.pity}<span>/ 30</span></div><p class="counter-caption">あと <strong>${30-s.pity}回</strong>でS確定</p><div class="progress" aria-hidden="true">${Array.from({length:30},(_,i)=>`<i class="${i<s.pity?'filled':''}"></i>`).join('')}</div></section><section class="panel counter ${s.streak===5?'guarantee':''}"><h2>低排出保証 · 高排出連続</h2><div class="counter-number">${s.streak}<span>/ 5</span></div><p class="counter-caption">${s.streak===5?'<strong>次のSは低排出確定</strong>':'低排出Sが出るとリセット'}</p><div class="streak-dots" aria-hidden="true">${Array.from({length:5},(_,i)=>`<i class="${i<s.streak?'filled':''}"></i>`).join('')}</div></section></div><div class="lower-grid"><section class="panel"><div class="section-head"><h2>直近の記録</h2>${button('history','すべて見る →','text-button')}</div>${recent||'<p class="empty">このシーズンの記録はまだありません。</p>'}</section><section class="panel"><div class="section-head"><h2>今シーズン</h2><span class="eyebrow">${esc(season.name)}</span></div><dl class="stats"><div><dt>総ガチャ回数</dt><dd>${s.total}<small>回</small></dd></div><div><dt>S排出数</dt><dd>${s.sCount}<small>体</small></dd></div><div><dt>高排出S</dt><dd>${s.high}<small>体</small></dd></div><div><dt>低排出S</dt><dd>${s.low}<small>体</small></dd></div></dl><p class="help">現在のプール：${p?esc(p.label)+' · '+p.generals.length+'人':'未設定'}</p>${p?button('current-pool','プールを見る →','text-button'):''}</section></div>`;
 }
 async function exclusive(fn){
-  if(busy){toast('保存・同期が終わるまでお待ちください。');return false;}
+  if(busy){toast('端末への保存処理中です。');return false;}
   busy=true;render();
   const run=async()=>{const saved=store.read();if(saved)env=saved;return fn();};
   try{return navigator.locks?await navigator.locks.request(key,run):await run();}
   catch(e){toast(e.message||'処理できませんでした。');return false;}
   finally{busy=false;render();}
 }
-async function syncInside(){
-  if(!config)return;
-  try{env=store.write(await synchronize(env,new GitHub(config)));syncError='';conflict=null;}
-  catch(e){if(e instanceof ConflictError){conflict=e.remote;syncError='';}else{syncError=e.message;}throw e;}
+// Record input never waits for GitHub. One worker serializes remote traffic and
+// reconciles late replies with the newest locally saved revision.
+function queueSync(delay=900){
+  if(!config||fatal||conflict)return;
+  if(syncing){syncQueued=true;return;}
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(()=>{syncTimer=null;void syncBackground();},delay);
 }
-async function syncNow(quiet=false){return exclusive(async()=>{try{await syncInside();if(!quiet)toast('同期しました。');return true;}catch(e){if(!quiet)toast(e.message);return false;}});}
+async function syncBackground(){
+  if(syncing)return;
+  if(busy){queueSync(250);return;}
+  if(!config||fatal||conflict)return;
+  syncing=true;syncQueued=false;syncError='';render();
+  const snapshot=env, remote=new GitHub(config);
+  let success=false;
+  try{
+    const result=await synchronize(snapshot,remote);
+    const commit=()=>{
+      const current=store.read();
+      if(!current)return;
+      const next=mergeSyncResult(snapshot,current,result);
+      if(next){env=store.write(next);}
+    };
+    if(navigator.locks)await navigator.locks.request(key,commit);
+    else commit();
+    if(env.remoteKey===snapshot.remoteKey){syncError='';conflict=null;}
+    success=true;
+  }catch(e){
+    if(env.remoteKey===snapshot.remoteKey){
+      if(e instanceof ConflictError){conflict=e.remote;syncError='';}
+      else syncError=e.message;
+    }
+  }finally{
+    syncing=false;render();
+    if(success&&syncQueued&&env.dirty&&!conflict)queueSync(0);
+    syncQueued=false;
+  }
+}
+function syncNow(quiet=false){
+  if(!config){if(!quiet)toast('先にGitHubへ接続してください。');return;}
+  if(!quiet)toast('同期を開始します。完了は状態欄で確認してください。');
+  queueSync(0);
+}
 async function mutate(command,revision=d().revision){
-  return exclusive(async()=>{
+  const ok=await exclusive(async()=>{
     if(conflict)throw new Error('先に同期の競合を確認してください。');
     if(env.data.revision!==revision)throw new Error('別の画面で記録が更新されました。内容を確認して操作し直してください。');
     const data=apply(d(),command,deviceId);
-    const next={...env,data,dirty:true};
-    store.write(next);env=next; // Only report success after durable local write.
-    try{await syncInside();}catch(e){toast(e.message);}
+    env=store.write({...env,data,dirty:true}); // Success requires durable local write.
     return true;
   });
+  if(ok)queueSync();
+  return ok;
 }
 function management(){show('管理',`<div class="stack">${[['seasons','シーズン管理'],['generals','武将管理'],['pool','排出プール管理'],['github','データ同期 / GitHub設定'],['backup','バックアップ / エクスポート']].map(([a,t])=>button(a,esc(t)+'<span>›</span>','menu-item')).join('')}</div><p class="help">記録日時は日本時間で表示します。</p>`);}
 function seasonMenu(){show('シーズン管理',`<p class="help">現在：${esc(activeSeason(d())?.name||'未開始')}</p><div class="stack">${d().seasons.slice().reverse().map(s=>button('season-history',`${esc(s.name)} <span class="muted">${project(d(),s.id).total}回</span>`,'menu-item',`data-id="${esc(s.id)}"`)).join('')}</div>${actionRow(button('switch-confirm','シーズンを切り替える','primary'))}`);}
@@ -121,7 +167,7 @@ function history(sid=d().activeSeasonId,mode='S',limit=100){
   show('履歴・集計',`<label class="field">シーズン<select id="history-season">${options}</select></label><dl class="stats"><div><dt>総ガチャ回数</dt><dd>${s.total}</dd></div><div><dt>S排出数</dt><dd>${s.sCount}</dd></div><div><dt>高排出S / 低排出S</dt><dd>${s.high} / ${s.low}</dd></div><div><dt>平均S間隔</dt><dd>${s.average===null?'—':s.average.toFixed(1)}<small>回</small></dd></div></dl><div class="filters">${button('history-s','S履歴',mode==='S'?'selected':'')}${button('history-all','操作ログ',mode==='all'?'selected':'')}${button('pool-history','プール履歴')}</div>${content||'<p class="empty">記録はまだありません。</p>'}${rows.length>limit?button('more-history','さらに100件表示','full'):''}`);
 }
 function poolHistory(){const sid=view.sid||d().activeSeasonId,pools=d().pools.filter(p=>p.seasonId===sid).reverse();show('排出プールの履歴',`<div class="stack">${pools.map(p=>button('pool-detail',`<span>${esc(p.label)}<br><small>${fmt(p.createdAt)} · ${p.generals.length}人</small></span>`,'menu-item',`data-id="${esc(p.id)}"`)).join('')||'<p class="empty">プールはまだありません。</p>'}</div>`);}
-function undo(){const e=project(d()).rows.at(-1);if(!e)return;view={revision:d().revision,targetId:e.id};show('直近1件を戻しますか？',`<p class="log-time">${fmt(e.at)}</p><h3>${e.result==='S'?'S：'+esc(e.general.name):'+1'}</h3><p class="help">S天井・高排出連続・集計を、この操作の直前に戻します。取消の履歴は操作ログに残ります。</p>${actionRow(button('close','キャンセル')+button('confirm-undo','この記録を戻す','primary'))}`);}
+function undo(){const e=project(d()).rows.at(-1);if(!e)return;const batch=!!e.batchId;view={revision:d().revision,targetId:e.id};show(batch?'直近の5連を戻しますか？':'直近1件を戻しますか？',`<p class="log-time">${fmt(e.at)}</p><h3>${e.result==='S'?'S：'+esc(e.general.name):batch?'+5（5連）':'+1'}</h3><p class="help">S天井・高排出連続・集計を、この操作の直前に戻します。取消の履歴は操作ログに残ります。</p>${actionRow(button('close','キャンセル')+button('confirm-undo','この記録を戻す','primary'))}`);}
 function githubSettings(){
   const c=config||savedSettings||{};
   show('データ同期 / GitHub設定',`<p class="help">PC・スマホで同じ非公開リポジトリを指定します。トークンは端末ごとに設定してください。</p><form id="github-form"><label class="field">GitHubユーザー名（Owner）<input name="owner" value="${esc(c.owner)}" placeholder="your-name" required autocapitalize="off" spellcheck="false"></label><label class="field">記録用リポジトリ名<input name="repo" value="${esc(c.repo)}" placeholder="meisho-gacha-data" required autocapitalize="off" spellcheck="false"></label><label class="field">ブランチ<input name="branch" value="${esc(c.branch||'main')}" required autocapitalize="off" spellcheck="false"></label><label class="field">保存ファイル<input name="path" value="${esc(c.path||'data/record.json')}" required autocapitalize="off" spellcheck="false"></label><label class="field">アクセストークン<input name="token" type="password" autocomplete="off" placeholder="${c.token?'空欄なら保存済みトークンを使います':'github_pat_…'}" ${c.token?'':'required'}><small>Fine-grained token：対象リポジトリのみ / Contents: Read and write</small></label><label class="check-row"><input name="remember" type="checkbox" ${c.remember!==false?'checked':''}>この端末にトークンを保存する</label><p class="help">保存すると次回から自動同期します。トークンはこのブラウザ内に保存され、JSONバックアップや公開ファイルには入りません。共用端末では保存を外してください。</p>${actionRow(button('close','キャンセル')+'<button type="submit" class="primary">接続して確認</button>')}</form>${config?'<hr>'+button('disconnect','この端末の接続設定を解除','full'):''}<p class="help"><a href="./docs/SETUP.html" target="_blank" rel="noopener">セットアップ手順を開く ↗</a></p>`);
@@ -167,12 +213,13 @@ async function prepareImport(file){
     show('競合バックアップから選ぶ',`<div class="review-grid"><div><p class="eyebrow">保存時の端末側</p>${summary(value.local)}</div><div><p class="eyebrow">保存時のGitHub側</p>${summary(value.github)}</div></div>${actionRow(button('import-bundle-local','端末側を選ぶ','primary')+button('import-bundle-remote','GitHub側を選ぶ','',value.github?'':'disabled'))}`);
   }else importReview(value);
 }
-async function confirmImport(){const v=view;if(fatal){store.write(makeEnvelope(v.data));localStorage.removeItem(key+':config');sessionStorage.removeItem(key+':token');location.reload();return;}const ok=await exclusive(async()=>{if(d().revision!==v.revision)throw new Error('記録が更新されました。ファイルを選び直してください。');store.backup(d(),'インポート前');download(d(),'meisho-before-import');env=store.write({...env,data:v.data,dirty:true});conflict=null;try{await syncInside();}catch(e){toast(e.message);}return true;});if(ok){close();toast('バックアップを復元しました。');}}
+async function confirmImport(){const v=view;if(fatal){store.write(makeEnvelope(v.data));localStorage.removeItem(key+':config');sessionStorage.removeItem(key+':token');location.reload();return;}const ok=await exclusive(async()=>{if(d().revision!==v.revision)throw new Error('記録が更新されました。ファイルを選び直してください。');store.backup(d(),'インポート前');download(d(),'meisho-before-import');env=store.write({...env,data:v.data,dirty:true});conflict=null;syncError='';return true;});if(ok){close();toast('バックアップを復元しました。');queueSync();}}
 const handlers={
   close,management,seasons:seasonMenu,'switch-confirm':switchConfirm,'new-season':newSeason,generals,'batch-rates':batchRates,'add-general':()=>editGeneral(), 'edit-general':b=>editGeneral(b.dataset.id),pool:poolEditor,
-  normal:async()=>{if(project(d()).pity===29){chooseS();return;}if(await mutate({type:'normal',at:now()}))toast('+1を記録しました。');},
+  normal:async()=>{if(project(d()).pity===29){chooseS();return;}if(await mutate({type:'normal',at:now()}))toast('+1を端末に記録しました。');},
+  normal5:async()=>{if(await mutate({type:'normal5',at:now()}))toast('5連（+5）を端末に記録しました。');},
   'choose-s':chooseS,'record-s':async b=>{const v=view;if(await mutate({type:'S',generalId:b.dataset.id,at:v.at},v.revision)){close();toast('S武将を記録しました。');}},
-  undo,'confirm-undo':async()=>{const v=view;if(await mutate({type:'undo',targetId:v.targetId},v.revision)){close();toast('直近1件を戻しました。');}},
+  undo,'confirm-undo':async()=>{const v=view,batch=project(d()).rows.at(-1)?.batchId;if(await mutate({type:'undo',targetId:v.targetId},v.revision)){close();toast(batch?'直近の5連をまとめて戻しました。':'直近1件を戻しました。');}},
   faction:b=>{view.faction=b.dataset.value;paintList();},
   'select-visible':()=>{filtered(d().generals).filter(g=>view.mode==='batch'||g.rate!=='unknown').forEach(g=>view.selected.add(g.id));paintList();},
   'clear-selection':()=>{view.selected.clear();paintList();},
@@ -186,7 +233,7 @@ const handlers={
   'export-raw':()=>download(localStorage.getItem(key),'meisho-recovery-raw')
 };
 async function setRates(rate){const v=view;if(await mutate({type:'rates',ids:[...v.selected],rate},v.revision)){generals();toast('排出区分を保存しました。');}}
-document.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b||b.disabled)return;if(busy){toast('保存・同期中です。少しお待ちください。');return;}try{await handlers[b.dataset.action]?.(b);}catch(err){toast(err.message);}});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-action]');if(!b||b.disabled)return;if(busy){toast('端末への保存処理中です。');return;}try{await handlers[b.dataset.action]?.(b);}catch(err){toast(err.message);}});
 $('#settings').addEventListener('click',()=>{if(!busy&&!fatal)management();});
 $('#dialog-close').addEventListener('click',()=>{if(!busy)close();});
 dialog.addEventListener('cancel',e=>{if(busy)e.preventDefault();});

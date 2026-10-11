@@ -19,3 +19,34 @@ test('GitHub Contents API uses private repo, SHA, branch, valid utf8 and scoped 
 test('public data repo is rejected; 404 is absent only after repository and branch verified',async()=>{const publicApi=new GitHub(c,async()=>({ok:true,json:async()=>({private:false})}));await assert.rejects(publicApi.verify(),/非公開/);let checks=0;const api=new GitHub(c,async url=>{if(url.includes('/contents/'))return {ok:false,status:404};checks++;return {ok:true,json:async()=>({private:true})};});assert.deepEqual(await api.read(),{sha:null,data:null});assert.equal(checks,2);const bad=new GitHub(c,async()=>({ok:false,status:404}));await assert.rejects(bad.read(),/権限/);});
 test('local write failure never returns successful persistence; corruption is not initialized away',()=>{const values=new Map(),memory={getItem:k=>values.get(k)||null,setItem:(k,v)=>values.set(k,v)};const s=new LocalStore(memory,'test');const env=makeEnvelope(createData());s.write(env);assert.deepEqual(s.read(),env);const failing=new LocalStore({...memory,setItem:()=>{throw new Error('quota');}},'test');assert.throws(()=>failing.write({...env,dirty:false}),/quota/);assert.deepEqual(s.read(),env);values.set('test','corrupted');assert.throws(()=>s.read());assert.equal(values.get('test'),'corrupted');});
 test('recovery backups bounded at five, preserve original content',()=>{const memory=new Map(),store=new LocalStore({getItem:k=>memory.get(k)||null,setItem:(k,v)=>memory.set(k,v)},'app');const d=createData();for(let i=0;i<7;i++)store.backup(d,'b'+i);assert.equal(store.backups().length,5);assert.equal(store.backups()[0].label,'b2');assert.deepEqual(store.backups()[4].data,d);});
+
+// A slow GitHub round-trip must not erase an extra pull made after the request starts.
+// The next sync should publish both pulls as one current snapshot.
+test('late GitHub response never overwrites a newer locally stored pull',async()=>{
+  const {mergeSyncResult}=await import('../sync-merge.js');
+  let base=createData();base=apply(base,{type:'season',name:'S5'});
+  const remote=makeRemote(base),original=envelope(base,remote,false);
+  const first=apply(base,{type:'season',name:'PK3'});
+  const snapshot={...original,data:first,dirty:true};
+  const pending=synchronize(snapshot,remote);
+  const later=apply(first,{type:'season',name:'PK4'});
+  const current={...snapshot,data:later,dirty:true};
+  const saved=mergeSyncResult(snapshot,current,await pending);
+  assert.equal(saved.data.seasons.length,3);
+  assert.equal(saved.dirty,true);
+  assert.equal(saved.baseSha,remote.sha);
+  const finished=await synchronize(saved,remote);
+  assert.equal(finished.dirty,false);
+  assert.deepEqual(remote.data,later);
+  assert.equal(remote.writes,2);
+});
+test('remote changes during a clean sync plus a new local pull become a conflict, not an overwrite',async()=>{
+  const {mergeSyncResult}=await import('../sync-merge.js');
+  const base=createData(),remote=makeRemote(base),snapshot=envelope(base,remote,false);
+  const current={...snapshot,data:apply(base,{type:'season',name:'local'}),dirty:true};
+  remote.data=apply(base,{type:'season',name:'remote'});
+  remote.sha='remote-revision';
+  const result=await synchronize(snapshot,remote);
+  assert.throws(()=>mergeSyncResult(snapshot,current,result),e=>e.name==='ConflictError');
+  assert.equal(current.data.seasons[0].name,'local');
+});

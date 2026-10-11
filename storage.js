@@ -1,4 +1,4 @@
-import {validate,clone,id} from './core.js';
+import {validate,clone,id} from './core.js?v=0.1.5';
 export class LocalStore {
   constructor(storage,key){this.storage=storage;this.key=key;}
   read(){const raw=this.storage.getItem(this.key);if(!raw)return null;const e=JSON.parse(raw);validate(e.data);if(typeof e.dirty!=='boolean')throw new Error('端末内データの保存状態が不正です。');return e;}
