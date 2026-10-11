@@ -1,8 +1,9 @@
 import {seed} from './seed.js';
-import {id,now,clone,createData,validate,apply,project,activeSeason,currentPool,generalSort} from './core.js?v=0.1.5';
-import {LocalStore,makeEnvelope} from './storage.js?v=0.1.5';
-import {GitHub,normalizeConfig,remoteKey,synchronize,ConflictError} from './sync.js?v=0.1.5';
-import {mergeSyncResult} from './sync-merge.js?v=0.1.5';
+import {id,now,clone,createData,validate,apply,project,activeSeason,currentPool,generalSort} from './core.js?v=0.1.6';
+import {LocalStore,makeEnvelope} from './storage.js?v=0.1.6';
+import {GitHub,normalizeConfig,remoteKey,synchronize,ConflictError} from './sync.js?v=0.1.6';
+import {mergeSyncResult} from './sync-merge.js?v=0.1.6';
+import {splitSeasonAt} from './repair.js?v=0.1.6';
 
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const app=$('#app'), dialog=$('#dialog'), body=$('#dialog-body');
@@ -121,10 +122,42 @@ async function mutate(command,revision=d().revision){
   if(ok)queueSync();
   return ok;
 }
-function management(){show('管理',`<div class="stack">${[['seasons','シーズン管理'],['generals','武将管理'],['pool','排出プール管理'],['github','データ同期 / GitHub設定'],['backup','バックアップ / エクスポート']].map(([a,t])=>button(a,esc(t)+'<span>›</span>','menu-item')).join('')}</div><p class="help">記録日時は日本時間で表示します。</p>`);}
+function management(){show('管理',`<div class="stack">${[['seasons','シーズン管理'],['generals','武将管理'],['pool','排出プール管理'],['github','データ同期 / GitHub設定'],['backup','バックアップ / エクスポート'],['repair','PK1→PK2 誤記録の修復']].map(([a,t])=>button(a,esc(t)+'<span>›</span>','menu-item')).join('')}</div><p class="help">記録日時は日本時間で表示します。</p>`);}
 function seasonMenu(){show('シーズン管理',`<p class="help">現在：${esc(activeSeason(d())?.name||'未開始')}</p><div class="stack">${d().seasons.slice().reverse().map(s=>button('season-history',`${esc(s.name)} <span class="muted">${project(d(),s.id).total}回</span>`,'menu-item',`data-id="${esc(s.id)}"`)).join('')}</div>${actionRow(button('switch-confirm','シーズンを切り替える','primary'))}`);}
 function switchConfirm(){show('シーズンを切り替えますか？',`<p>今のシーズンの履歴を残し、S天井・高排出連続を0から始めます。</p>${actionRow(button('seasons','NO · 戻る')+button('new-season','YES · 次へ','primary'))}`);}
 function newSeason(){view={revision:d().revision};show('新しいシーズン名',`<form id="season-form"><label class="field">シーズン名<input name="name" maxlength="40" placeholder="例：S5、PK3" required autofocus autocomplete="off"></label><p class="help">名前を確定するとシーズンが切り替わり、初期排出プールの設定に進みます。</p>${actionRow(button(activeSeason(d())?'seasons':'close','キャンセル')+'<button class="primary" type="submit">シーズン名を確定</button>')}</form>`);}
+function repairMenu(){
+  const source=d().seasons.find(s=>s.name==='PK1')||activeSeason(d());
+  view={mode:'repair',revision:d().revision,sourceSeasonId:source?.id};
+  show('PK1 → PK2 誤記録を修復',`<p>PK1に誤って記録したPK2のガチャを、記録日時を境に分離します。<strong>元の操作日時・S武将・排出プール情報は保持</strong>します。</p>${notice('確認画面の時点では記録は変更されません。修復前の全データをJSONに自動保存します。PC・スマホのほかの画面は閉じ、GitHub同期完了を確認してください。','warning')}<form id="repair-form"><label class="field">修復元シーズン<select name="source" required>${d().seasons.map(s=>`<option value="${esc(s.id)}" ${s.id===source?.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label><label class="field">PK2が始まった日時（日本時間）<input name="cutoff" type="datetime-local" value="2026-10-10T11:00" required></label><label class="field">新しいシーズン名<input name="target" value="PK2" maxlength="40" required></label>${actionRow(button('close','キャンセル')+'<button type="submit" class="primary">修復結果を確認</button>')}</form><p class="help">日時以降の操作をまとめてPK2に移します。途中で日時が逆転していたり、取消や天井の矛盾が出る場合は処理を止めます。</p>`);
+}
+function repairPreview(form){
+  const f=new FormData(form),sourceSeasonId=String(f.get('source')),
+   value=String(f.get('cutoff')),newSeasonName=String(f.get('target'));
+  if(!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value))throw new Error('日時の入力形式が不正です。');
+  // Interpret as Japan time, irrespective of the device time zone.
+  const cutoffISO=new Date(value+':00+09:00').toISOString();
+  const result=splitSeasonAt(d(),{sourceSeasonId,newSeasonName,cutoffISO});
+  const x=result.detail;
+  view={mode:'repair-preview',revision:d().revision,result};
+  show('修復内容の最終確認',`<p class="help">切替日時（日本時間）：${esc(value.replace('T',' '))}</p><div class="review-grid"><div><p class="eyebrow">${esc(x.fromName)}（修復後）</p><strong>${x.before.total}回 / S ${x.before.sCount}体</strong><p>S天井 ${x.before.pity}/30 · 高排出連続 ${x.before.streak}/5</p></div><div><p class="eyebrow">${esc(x.toName)}（新設）</p><strong>${x.after.total}回 / S ${x.after.sCount}体</strong><p>S天井 ${x.after.pity}/30 · 高排出連続 ${x.after.streak}/5</p></div></div><p>移動対象：<strong>${x.movedPulls}回</strong>（取消を含む操作ログ${x.movedOperations}件）<br>対応する排出プール：${x.copiedPools}版</p>${notice('修復前のJSONは自動ダウンロードし、端末内にもバックアップします。修復後はGitHub同期されるため、別端末では同期完了後に開き直してください。','warning')}<label class="check-row"><input type="checkbox" id="repair-agree">移動件数とシーズン別の結果を確認した</label>${actionRow(button('repair','戻って変更')+button('repair-confirm','この内容で修復する','primary'))}`);
+}
+async function repairConfirm(){
+  const v=view;
+  if(!$('#repair-agree')?.checked){toast('修復内容を確認し、チェックを入れてください。');return;}
+  const ok=await exclusive(async()=>{
+    if(syncing||conflict)throw new Error('GitHub同期中または競合中は修復できません。同期完了を確認してください。');
+    if(d().revision!==v.revision)throw new Error('記録が変わりました。修復内容を確認し直してください。');
+    // Compute again from the newest stored data; do not trust stale preview.
+    const x=v.result.detail;
+    const repaired=splitSeasonAt(d(),{sourceSeasonId:x.sourceSeasonId,newSeasonName:x.toName,cutoffISO:x.cutoffISO});
+    store.backup(d(),'PK1→PK2修復前');
+    download(d(),'meisho-before-pk2-repair');
+    env=store.write({...env,data:repaired.data,dirty:true});
+    return true;
+  });
+  if(ok){close();toast('PK1とPK2を分離しました。同期状況を確認してください。');queueSync();}
+}
 function factions(list){return [...new Set(list.map(g=>g.faction))].sort((a,b)=>a.localeCompare(b,'ja'));}
 function filterBar(list){return `<input id="general-search" type="search" placeholder="武将名・よみで検索" aria-label="武将名・よみで検索" autocomplete="off"><div class="filters">${['すべて',...factions(list)].map(f=>button('faction',esc(f),f===(view.faction||'すべて')?'selected':'',`data-value="${esc(f)}" aria-pressed="${f===(view.faction||'すべて')}"`)).join('')}</div>`;}
 function filtered(list){const q=(view.query||'').trim().toLocaleLowerCase();return list.filter(g=>(!view.faction||view.faction==='すべて'||g.faction===view.faction)&&(!q||(g.name+g.reading).toLocaleLowerCase().includes(q))).sort(generalSort);}
@@ -215,7 +248,7 @@ async function prepareImport(file){
 }
 async function confirmImport(){const v=view;if(fatal){store.write(makeEnvelope(v.data));localStorage.removeItem(key+':config');sessionStorage.removeItem(key+':token');location.reload();return;}const ok=await exclusive(async()=>{if(d().revision!==v.revision)throw new Error('記録が更新されました。ファイルを選び直してください。');store.backup(d(),'インポート前');download(d(),'meisho-before-import');env=store.write({...env,data:v.data,dirty:true});conflict=null;syncError='';return true;});if(ok){close();toast('バックアップを復元しました。');queueSync();}}
 const handlers={
-  close,management,seasons:seasonMenu,'switch-confirm':switchConfirm,'new-season':newSeason,generals,'batch-rates':batchRates,'add-general':()=>editGeneral(), 'edit-general':b=>editGeneral(b.dataset.id),pool:poolEditor,
+  close,management,repair:repairMenu,'repair-confirm':repairConfirm,seasons:seasonMenu,'switch-confirm':switchConfirm,'new-season':newSeason,generals,'batch-rates':batchRates,'add-general':()=>editGeneral(), 'edit-general':b=>editGeneral(b.dataset.id),pool:poolEditor,
   normal:async()=>{if(project(d()).pity===29){chooseS();return;}if(await mutate({type:'normal',at:now()}))toast('+1を端末に記録しました。');},
   normal5:async()=>{if(await mutate({type:'normal5',at:now()}))toast('5連（+5）を端末に記録しました。');},
   'choose-s':chooseS,'record-s':async b=>{const v=view;if(await mutate({type:'S',generalId:b.dataset.id,at:v.at},v.revision)){close();toast('S武将を記録しました。');}},
@@ -242,6 +275,7 @@ document.addEventListener('change',async e=>{try{if(e.target.dataset.general){if
 document.addEventListener('submit',async e=>{
   e.preventDefault();if(busy)return;const form=e.target, f=new FormData(form),v=view;
   try{
+    if(form.id==='repair-form'){repairPreview(form);return;}
     if(form.id==='season-form'){if(await mutate({type:'season',name:String(f.get('name')).trim()},v.revision))poolEditor();}
     if(form.id==='general-form'){
       const reading=String(f.get('reading')).trim();if(!/^[ぁ-ゖー\s]+$/.test(reading))throw new Error('よみはひらがなで入力してください。');

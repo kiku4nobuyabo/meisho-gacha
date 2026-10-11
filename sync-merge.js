@@ -1,4 +1,4 @@
-import {ConflictError} from './sync.js?v=0.1.5';
+import {ConflictError} from './sync.js?v=0.1.6';
 
 // A network request can finish after newer pulls have already been saved locally.
 // Never replace those pulls with the request's older snapshot.
